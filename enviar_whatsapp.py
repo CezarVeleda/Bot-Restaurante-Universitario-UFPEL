@@ -135,6 +135,17 @@ def preparar_no_grupo(
         print("direto no WhatsApp Web, quando quiser. Pode fechar esta janela.")
 
 
+def _pausar_para_fechar() -> None:
+    """Pausa esperando Enter (clique duplo/terminal interativo). Sem terminal
+    conectado (ex: rodando em background) input() levanta EOFError — nesse
+    caso não há ninguém pra apertar Enter mesmo, então só ignoramos.
+    """
+    try:
+        input("\nPressione Enter para fechar esta janela...")
+    except EOFError:
+        pass
+
+
 def _extrair_valor_de_flag(args: list[str], nome_flag: str) -> tuple[str | None, list[str]]:
     """Remove `nome_flag valor` de args (se presente) e devolve (valor, args_restantes)."""
     if nome_flag not in args:
@@ -174,12 +185,12 @@ def main() -> None:
     except Exception as erro:
         print(f"\n[ERRO] {type(erro).__name__}: {erro}")
         if not rodando_agendado:
-            input("\nPressione Enter para fechar esta janela...")
+            _pausar_para_fechar()
         return
 
     # Se rodou com clique duplo, sem isso a janela fecha rápido demais pra ler.
     if not rodando_agendado and enviar_automaticamente:
-        input("\nPressione Enter para fechar esta janela...")
+        _pausar_para_fechar()
 
 
 if __name__ == "__main__":
