@@ -11,6 +11,8 @@ Uso:
     python enviar_whatsapp.py                # gera (se preciso) e envia o cardápio de hoje
     python enviar_whatsapp.py --manual       # só cola, você aperta Enviar
     python enviar_whatsapp.py 17/07/2026     # usa o cardápio de uma data específica
+    python enviar_whatsapp.py --teste        # testa o fluxo inteiro no grupo "Só eu"
+    python enviar_whatsapp.py --destino "Nome do Grupo"  # testa em qualquer grupo/contato
 """
 from __future__ import annotations
 
@@ -32,6 +34,10 @@ from ru_cardapio import gerar_cardapio_do_dia
 # Nome do grupo criado especificamente para o bot postar o cardápio do dia.
 TERMO_BUSCA_GRUPO = "Cardápio RU UFPEL"
 FILTRO_TITULO_GRUPO = "Cardápio RU UFPEL"
+
+# Grupo próprio (só o usuário) usado como destino de teste com --teste, pra
+# validar o fluxo de busca/colar/enviar sem incomodar o grupo real.
+GRUPO_TESTE = "Só eu"
 
 PASTA_PROJETO = Path(__file__).parent
 PERFIL_CHROME = PASTA_PROJETO / "perfil_chrome"
@@ -129,6 +135,16 @@ def preparar_no_grupo(
         print("direto no WhatsApp Web, quando quiser. Pode fechar esta janela.")
 
 
+def _extrair_valor_de_flag(args: list[str], nome_flag: str) -> tuple[str | None, list[str]]:
+    """Remove `nome_flag valor` de args (se presente) e devolve (valor, args_restantes)."""
+    if nome_flag not in args:
+        return None, args
+    idx = args.index(nome_flag)
+    valor = args[idx + 1] if idx + 1 < len(args) else None
+    restantes = args[:idx] + args[idx + 2 :]
+    return valor, restantes
+
+
 def main() -> None:
     if sys.stdout and sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
         sys.stdout.reconfigure(encoding="utf-8")
@@ -139,13 +155,22 @@ def main() -> None:
     enviar_automaticamente = "--manual" not in sys.argv
     rodando_agendado = "--agendado" in sys.argv
     args = [a for a in sys.argv[1:] if a not in ("--manual", "--agendado")]
+
+    # --destino "Nome" aponta o bot pra qualquer grupo/contato específico;
+    # --teste é um atalho pro grupo "Só eu", pra validar o fluxo sem mexer
+    # no grupo real da turma.
+    destino, args = _extrair_valor_de_flag(args, "--destino")
+    if "--teste" in args:
+        args.remove("--teste")
+        destino = destino or GRUPO_TESTE
+
+    termo_busca = destino or TERMO_BUSCA_GRUPO
+    filtro_titulo = destino or FILTRO_TITULO_GRUPO
     data_arg = args[0] if args else None
 
     try:
         mensagem = _obter_mensagem_do_dia(data_arg)
-        preparar_no_grupo(
-            TERMO_BUSCA_GRUPO, FILTRO_TITULO_GRUPO, mensagem, enviar_automaticamente
-        )
+        preparar_no_grupo(termo_busca, filtro_titulo, mensagem, enviar_automaticamente)
     except Exception as erro:
         print(f"\n[ERRO] {type(erro).__name__}: {erro}")
         if not rodando_agendado:
