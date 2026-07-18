@@ -108,13 +108,20 @@ def formatar_refeicao(nome_refeicao: str, itens: list[dict]) -> str:
 
     linhas = []
     for item in itens:
-        categoria = categorizar(item["nome"], item.get("descricao", ""))
+        nome = item.get("nome", "").strip()
+        if not nome:
+            print(f"[aviso] Item sem campo 'nome' ignorado: {item}", file=sys.stderr)
+            continue
+        categoria = categorizar(nome, item.get("descricao", ""))
         emoji = EMOJI_CATEGORIA[categoria]
-        nome = item["nome"].strip().title()
+        nome = nome.title()
         if categoria == "proteina":
             linhas.append(f"{emoji} *{nome}*")
         else:
             linhas.append(f"{emoji} {nome}")
+
+    if not linhas:
+        return f"_Sem {nome_refeicao.lower()} cadastrada para esta data._"
     return "\n".join(linhas)
 
 

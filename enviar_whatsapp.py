@@ -86,8 +86,10 @@ def _abrir_conversa(driver: webdriver.Chrome, termo_busca: str, filtro_titulo: s
     caixa_pesquisa.send_keys(termo_busca)
     time.sleep(2)
 
+    # Título exato (não "contains") pra não arriscar clicar num contato ou
+    # grupo diferente cujo nome só contenha esse texto como substring.
     resultado = WebDriverWait(driver, 10).until(
-        EC.element_to_be_clickable((By.XPATH, f'//span[contains(@title, "{filtro_titulo}")]'))
+        EC.element_to_be_clickable((By.XPATH, f'//span[@title="{filtro_titulo}"]'))
     )
     resultado.click()
     time.sleep(1)
