@@ -1,0 +1,12 @@
+# Perfil do Chrome usado pelo Selenium (sessão logada do WhatsApp Web — NUNCA versionar)
+perfil_chrome/
+
+# Cardápios gerados diariamente (output reproduzível, não é código-fonte)
+saida/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
