@@ -45,9 +45,17 @@ GRUPO_TESTE = "Só eu"
 # Confirmado em 2026-07-26: fechar o Chrome poucos segundos depois (como o
 # código fazia antes) matava a conexão antes do envio real terminar,
 # resultando em "erro ao enviar mensagem" mesmo com o script logando
-# sucesso. Isso é mais provável logo após o boot da máquina (~08:00,
-# rede/WebSocket ainda estabilizando), por isso a espera é generosa.
-AGUARDO_POS_ENVIO_SEGUNDOS = 15
+# sucesso. Confirmação real é o ícone de status da mensagem (aria-label do
+# span dentro de [data-testid="msg-meta"]): basta chegar em " Enviada " (✓,
+# confirma que o servidor recebeu — é o suficiente pra descartar o "erro ao
+# enviar"). "Entregue"/"Lida" ficam na lista só como cobertura defensiva
+# (ex: se "Enviada" passar rápido demais e só flagrarmos o estado
+# seguinte) — o código NÃO espera a mensagem ser lida antes de retornar, o
+# que seria péssimo em grupo (lá o check azul só vem quando todo mundo lê,
+# pode nunca acontecer).
+STATUS_CONFIRMADOS = ("Enviada", "Entregue", "Lida")
+STATUS_ERRO = ("erro", "falha", "não enviada", "nao enviada")
+AGUARDO_STATUS_SEGUNDOS = 20
 
 PASTA_PROJETO = Path(__file__).parent
 PERFIL_CHROME = PASTA_PROJETO / "perfil_chrome"
@@ -138,25 +146,69 @@ def _caixa_mensagem_vazia(driver: webdriver.Chrome) -> bool:
     return driver.find_element(*CAIXA_MENSAGEM).text.strip() == ""
 
 
+def _status_ultima_mensagem(driver: webdriver.Chrome) -> str | None:
+    """Lê o aria-label do ícone de status (✓ Enviada / ✓✓ Entregue / Lida) da
+    última mensagem na conversa aberta. None se ainda não houver nenhuma
+    mensagem visível (ex: logo após o Enter).
+    """
+    return driver.execute_script(
+        """
+        const rows = document.querySelectorAll('div[role="row"]');
+        if (!rows.length) return null;
+        const status = rows[rows.length - 1]
+            .querySelector('[data-testid="msg-meta"] span[aria-label]');
+        return status ? status.getAttribute('aria-label') : null;
+        """
+    )
+
+
 def _enviar_e_confirmar(driver: webdriver.Chrome, tentativas: int = 2) -> None:
-    """Aperta Enter e confirma que a caixa de mensagem esvaziou (sinal de que o
-    WhatsApp Web realmente processou o envio). Um Enter logo após colar
-    conteúdo com emoji/quebras de linha às vezes é ignorado pela caixa —
-    sem essa checagem, o script logava "sucesso" mesmo com a mensagem presa
-    na caixa e nada saindo pro grupo.
+    """Aperta Enter e confirma a entrega de verdade pelo ícone de status da
+    mensagem, não só a caixa de texto esvaziar.
+
+    Dois problemas descobertos em 2026-07-26, nessa ordem: (1) um Enter logo
+    após colar conteúdo com emoji/quebras de linha às vezes é ignorado pela
+    caixa — resolvido esperando ela esvaziar; (2) a caixa esvaziar é só
+    reação otimista da UI local, não prova que a mensagem chegou ao
+    servidor — fechar o Chrome logo depois disso resultava em "erro ao
+    enviar mensagem" no WhatsApp mesmo com o script logando sucesso.
+    Resolvido esperando o ícone de status confirmar (" Enviada "/" Entregue
+    "/" Lida ") antes de retornar.
     """
     for tentativa in range(1, tentativas + 1):
         driver.find_element(*CAIXA_MENSAGEM).send_keys(Keys.ENTER)
         try:
             WebDriverWait(driver, 10).until(lambda d: _caixa_mensagem_vazia(d))
-            time.sleep(AGUARDO_POS_ENVIO_SEGUNDOS)
-            return
         except TimeoutException:
             if tentativa == tentativas:
                 raise RuntimeError(
                     "Caixa de mensagem continua com texto após Enter "
                     f"({tentativa} tentativa(s)) — o envio não foi confirmado."
                 )
+            continue
+
+        def _status_resolvido(d: webdriver.Chrome) -> bool:
+            status = _status_ultima_mensagem(d)
+            if not status:
+                return False
+            status_lower = status.lower()
+            return any(p.lower() in status_lower for p in STATUS_CONFIRMADOS) or any(
+                p in status_lower for p in STATUS_ERRO
+            )
+
+        try:
+            WebDriverWait(driver, AGUARDO_STATUS_SEGUNDOS).until(_status_resolvido)
+        except TimeoutException:
+            pass
+
+        status = _status_ultima_mensagem(driver)
+        if status and any(p in status for p in STATUS_CONFIRMADOS):
+            return
+        if tentativa == tentativas:
+            raise RuntimeError(
+                "Mensagem não confirmada como entregue pelo WhatsApp "
+                f"(status do ícone: {status!r})."
+            )
 
 
 def preparar_no_grupo(
