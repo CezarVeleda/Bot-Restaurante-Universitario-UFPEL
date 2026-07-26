@@ -4,6 +4,9 @@ perfil_chrome/
 # Cardápios gerados diariamente (output reproduzível, não é código-fonte)
 saida/
 
+# Log de execução (gerado em runtime, não é código-fonte)
+log.txt
+
 # Python
 __pycache__/
 *.pyc

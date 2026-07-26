@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pyperclip
 from selenium import webdriver
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -39,9 +40,30 @@ FILTRO_TITULO_GRUPO = "Cardápio RU UFPEL"
 # validar o fluxo de busca/colar/enviar sem incomodar o grupo real.
 GRUPO_TESTE = "Só eu"
 
+# A caixa de mensagem esvaziar é só a UI local do WhatsApp Web reagindo de
+# forma otimista ao Enter — não prova que a mensagem chegou ao servidor.
+# Confirmado em 2026-07-26: fechar o Chrome poucos segundos depois (como o
+# código fazia antes) matava a conexão antes do envio real terminar,
+# resultando em "erro ao enviar mensagem" mesmo com o script logando
+# sucesso. Isso é mais provável logo após o boot da máquina (~08:00,
+# rede/WebSocket ainda estabilizando), por isso a espera é generosa.
+AGUARDO_POS_ENVIO_SEGUNDOS = 15
+
 PASTA_PROJETO = Path(__file__).parent
 PERFIL_CHROME = PASTA_PROJETO / "perfil_chrome"
 SAIDA_DIR = PASTA_PROJETO / "saida"
+LOG_FILE = PASTA_PROJETO / "log.txt"
+
+
+def _log(mensagem: str) -> None:
+    """Grava em log.txt com timestamp — a tarefa agendada roda sem console
+    visível, então print() sozinho não deixa rastro nenhum se algo falhar.
+    """
+    linha = f"[{datetime.now().isoformat(timespec='seconds')}] {mensagem}"
+    print(linha)
+    with LOG_FILE.open("a", encoding="utf-8") as f:
+        f.write(linha + "\n")
+
 
 CAIXA_PESQUISA = (
     By.CSS_SELECTOR,
@@ -112,11 +134,37 @@ def _colar_mensagem(driver: webdriver.Chrome, mensagem: str) -> None:
     time.sleep(1)
 
 
+def _caixa_mensagem_vazia(driver: webdriver.Chrome) -> bool:
+    return driver.find_element(*CAIXA_MENSAGEM).text.strip() == ""
+
+
+def _enviar_e_confirmar(driver: webdriver.Chrome, tentativas: int = 2) -> None:
+    """Aperta Enter e confirma que a caixa de mensagem esvaziou (sinal de que o
+    WhatsApp Web realmente processou o envio). Um Enter logo após colar
+    conteúdo com emoji/quebras de linha às vezes é ignorado pela caixa —
+    sem essa checagem, o script logava "sucesso" mesmo com a mensagem presa
+    na caixa e nada saindo pro grupo.
+    """
+    for tentativa in range(1, tentativas + 1):
+        driver.find_element(*CAIXA_MENSAGEM).send_keys(Keys.ENTER)
+        try:
+            WebDriverWait(driver, 10).until(lambda d: _caixa_mensagem_vazia(d))
+            time.sleep(AGUARDO_POS_ENVIO_SEGUNDOS)
+            return
+        except TimeoutException:
+            if tentativa == tentativas:
+                raise RuntimeError(
+                    "Caixa de mensagem continua com texto após Enter "
+                    f"({tentativa} tentativa(s)) — o envio não foi confirmado."
+                )
+
+
 def preparar_no_grupo(
     termo_busca: str,
     filtro_titulo: str,
     mensagem: str,
     enviar_automaticamente: bool = True,
+    fechar_apos_enviar: bool = True,
 ) -> None:
     driver = _abrir_whatsapp_web()
     _aguardar_login(driver)
@@ -124,13 +172,14 @@ def preparar_no_grupo(
     _colar_mensagem(driver, mensagem)
 
     if enviar_automaticamente:
-        caixa_mensagem = driver.find_element(*CAIXA_MENSAGEM)
-        caixa_mensagem.send_keys(Keys.ENTER)
-        time.sleep(2)
-        print(f"Mensagem enviada para o grupo '{termo_busca}'.")
-        driver.quit()
+        _enviar_e_confirmar(driver)
+        _log(f"Mensagem enviada com sucesso para o grupo '{termo_busca}'.")
+        if fechar_apos_enviar:
+            driver.quit()
+        else:
+            print("Chrome fica aberto de propósito — confira a mensagem no grupo.")
     else:
-        print(f"\nMensagem colada no grupo '{termo_busca}'.")
+        _log(f"Mensagem colada (modo manual) no grupo '{termo_busca}', aguardando confirmação do usuário.")
         print("O navegador vai continuar aberto: confira o texto e aperte Enviar")
         print("direto no WhatsApp Web, quando quiser. Pode fechar esta janela.")
 
@@ -163,9 +212,17 @@ def main() -> None:
     # --manual desliga o envio automático e volta ao modo "só colar, eu envio".
     # --agendado é usado pela tarefa do Task Scheduler: roda sem parar no final
     # esperando Enter, já que não tem ninguém pra apertar nada.
+    # --diagnostico manda enviar normalmente mas não fecha o Chrome no final
+    # (nem em caso de sucesso nem de erro), pra investigar visualmente algo
+    # que deu errado no WhatsApp Web (ex: ícone de falha ao lado da mensagem).
     enviar_automaticamente = "--manual" not in sys.argv
     rodando_agendado = "--agendado" in sys.argv
-    args = [a for a in sys.argv[1:] if a not in ("--manual", "--agendado")]
+    fechar_apos_enviar = "--diagnostico" not in sys.argv
+    args = [
+        a
+        for a in sys.argv[1:]
+        if a not in ("--manual", "--agendado", "--diagnostico")
+    ]
 
     # --destino "Nome" aponta o bot pra qualquer grupo/contato específico;
     # --teste é um atalho pro grupo "Só eu", pra validar o fluxo sem mexer
@@ -179,14 +236,21 @@ def main() -> None:
     filtro_titulo = destino or FILTRO_TITULO_GRUPO
     data_arg = args[0] if args else None
 
+    _log(f"Iniciando envio (destino='{termo_busca}', agendado={rodando_agendado})...")
     try:
         mensagem = _obter_mensagem_do_dia(data_arg)
-        preparar_no_grupo(termo_busca, filtro_titulo, mensagem, enviar_automaticamente)
+        preparar_no_grupo(
+            termo_busca,
+            filtro_titulo,
+            mensagem,
+            enviar_automaticamente,
+            fechar_apos_enviar,
+        )
     except Exception as erro:
-        print(f"\n[ERRO] {type(erro).__name__}: {erro}")
+        _log(f"[ERRO] {type(erro).__name__}: {erro}")
         if not rodando_agendado:
             _pausar_para_fechar()
-        return
+        sys.exit(1)
 
     # Se rodou com clique duplo, sem isso a janela fecha rápido demais pra ler.
     if not rodando_agendado and enviar_automaticamente:
