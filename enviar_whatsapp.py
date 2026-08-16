@@ -116,7 +116,34 @@ def _aguardar_login(driver: webdriver.Chrome, timeout: int = 120) -> None:
     print("WhatsApp Web carregado.")
 
 
+def _fechar_popup_novidades(driver: webdriver.Chrome) -> None:
+    """Fecha modais que o WhatsApp Web às vezes mostra ao carregar (ex: "Veja
+    os novos recursos" depois de uma atualização), que ficam sobrepostos à
+    caixa de pesquisa e causam ElementClickInterceptedException (visto em
+    2026-08-16, log.txt 08:00:17).
+    """
+    dialogs = driver.find_elements(By.CSS_SELECTOR, 'div[role="dialog"][aria-modal="true"]')
+    if not dialogs:
+        return
+    for dialog in dialogs:
+        fechado = False
+        for seletor in ('[aria-label="Fechar"]', '[aria-label="Close"]', "button"):
+            try:
+                dialog.find_element(By.CSS_SELECTOR, seletor).click()
+                fechado = True
+                break
+            except Exception:
+                continue
+        if not fechado:
+            try:
+                driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+            except Exception:
+                pass
+    time.sleep(1)
+
+
 def _abrir_conversa(driver: webdriver.Chrome, termo_busca: str, filtro_titulo: str) -> None:
+    _fechar_popup_novidades(driver)
     caixa_pesquisa = driver.find_element(*CAIXA_PESQUISA)
     caixa_pesquisa.click()
     caixa_pesquisa.send_keys(termo_busca)
