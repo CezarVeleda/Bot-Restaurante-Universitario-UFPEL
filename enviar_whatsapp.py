@@ -13,12 +13,14 @@ Uso:
     python enviar_whatsapp.py 17/07/2026     # usa o cardápio de uma data específica
     python enviar_whatsapp.py --teste        # testa o fluxo inteiro no grupo "Só eu"
     python enviar_whatsapp.py --destino "Nome do Grupo"  # testa em qualquer grupo/contato
+    python enviar_whatsapp.py --retry-automatico  # se falhar, agenda 1 nova tentativa em 5 min
 """
 from __future__ import annotations
 
+import subprocess
 import sys
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pyperclip
@@ -61,6 +63,11 @@ PASTA_PROJETO = Path(__file__).parent
 PERFIL_CHROME = PASTA_PROJETO / "perfil_chrome"
 SAIDA_DIR = PASTA_PROJETO / "saida"
 LOG_FILE = PASTA_PROJETO / "log.txt"
+
+# Usados por --retry-automatico: nome da tarefa one-shot criada no Agendador
+# de Tarefas do Windows e do .bat que ela executa (reescrito a cada retry).
+NOME_TAREFA_RETRY = "CardapioRU_RetryAutomatico"
+ARQUIVO_RETRY_BAT = PASTA_PROJETO / "_retry_envio.bat"
 
 
 def _log(mensagem: str) -> None:
@@ -246,21 +253,82 @@ def preparar_no_grupo(
     fechar_apos_enviar: bool = True,
 ) -> None:
     driver = _abrir_whatsapp_web()
-    _aguardar_login(driver)
-    _abrir_conversa(driver, termo_busca, filtro_titulo)
-    _colar_mensagem(driver, mensagem)
+    try:
+        _aguardar_login(driver)
+        _abrir_conversa(driver, termo_busca, filtro_titulo)
+        _colar_mensagem(driver, mensagem)
 
-    if enviar_automaticamente:
-        _enviar_e_confirmar(driver)
-        _log(f"Mensagem enviada com sucesso para o grupo '{termo_busca}'.")
-        if fechar_apos_enviar:
-            driver.quit()
+        if enviar_automaticamente:
+            _enviar_e_confirmar(driver)
+            _log(f"Mensagem enviada com sucesso para o grupo '{termo_busca}'.")
+            if fechar_apos_enviar:
+                driver.quit()
+            else:
+                print("Chrome fica aberto de propósito — confira a mensagem no grupo.")
         else:
-            print("Chrome fica aberto de propósito — confira a mensagem no grupo.")
+            _log(f"Mensagem colada (modo manual) no grupo '{termo_busca}', aguardando confirmação do usuário.")
+            print("O navegador vai continuar aberto: confira o texto e aperte Enviar")
+            print("direto no WhatsApp Web, quando quiser. Pode fechar esta janela.")
+    except Exception:
+        # Sem isso, uma falha a meio do fluxo deixava o Chrome aberto e órfão
+        # (perfil_chrome usa detach=True de propósito pro modo --manual) —
+        # foi o que deixou o Chrome travado no WhatsApp em 2026-10-14, sem
+        # ninguém mais controlando a janela via WebDriver. --diagnostico
+        # continua preservando a janela de propósito, pra investigar.
+        if fechar_apos_enviar:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+        raise
+
+
+def _agendar_nova_tentativa(args_originais: list[str]) -> None:
+    """Agenda uma tarefa one-shot no Agendador de Tarefas do Windows pra
+    tentar o envio de novo em 5 minutos, com os mesmos argumentos da
+    tentativa atual, e finaliza a execução em andamento.
+
+    Finaliza em vez de só dar time.sleep(5 min) e tentar de novo no mesmo
+    processo porque: (1) se a falha foi por causa de um Chrome/perfil num
+    estado ruim, a tentativa nova precisa abrir um Chrome do zero, não
+    reaproveitar o mesmo processo; (2) ficar esperando seguraria o processo
+    (e um possível Chrome travado) de pé por mais 5 minutos sem necessidade.
+
+    Só uma nova tentativa é agendada (marcada com --retry-tentativa) — se
+    ela também falhar, o main() não chama esta função de novo, pra não
+    criar um loop infinito de retries.
+    """
+    agora_mais_5 = datetime.now() + timedelta(minutes=5)
+
+    args_retry = [a for a in args_originais if a != "--retry-tentativa"]
+    args_retry.append("--retry-tentativa")
+    args_fmt = " ".join(f'"{a}"' if " " in a else a for a in args_retry)
+
+    script = PASTA_PROJETO / "enviar_whatsapp.py"
+    ARQUIVO_RETRY_BAT.write_text(
+        "@echo off\r\n"
+        f'"{sys.executable}" "{script}" {args_fmt}\r\n'
+        f'schtasks /delete /tn "{NOME_TAREFA_RETRY}" /f\r\n',
+        encoding="utf-8",
+    )
+
+    resultado = subprocess.run(
+        [
+            "schtasks", "/create",
+            "/tn", NOME_TAREFA_RETRY,
+            "/tr", str(ARQUIVO_RETRY_BAT),
+            "/sc", "once",
+            "/sd", agora_mais_5.strftime("%d/%m/%Y"),
+            "/st", agora_mais_5.strftime("%H:%M"),
+            "/f",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if resultado.returncode == 0:
+        _log(f"Nova tentativa de envio agendada para {agora_mais_5.strftime('%H:%M')} (tarefa '{NOME_TAREFA_RETRY}').")
     else:
-        _log(f"Mensagem colada (modo manual) no grupo '{termo_busca}', aguardando confirmação do usuário.")
-        print("O navegador vai continuar aberto: confira o texto e aperte Enviar")
-        print("direto no WhatsApp Web, quando quiser. Pode fechar esta janela.")
+        _log(f"[ERRO] Falha ao agendar nova tentativa automática: {resultado.stderr.strip()}")
 
 
 def _pausar_para_fechar() -> None:
@@ -294,13 +362,26 @@ def main() -> None:
     # --diagnostico manda enviar normalmente mas não fecha o Chrome no final
     # (nem em caso de sucesso nem de erro), pra investigar visualmente algo
     # que deu errado no WhatsApp Web (ex: ícone de falha ao lado da mensagem).
+    # --retry-automatico: se o envio falhar, agenda 1 nova tentativa em 5 min
+    # (via Agendador de Tarefas) em vez de só desistir. --retry-tentativa é
+    # marcador interno (posto pela própria tentativa agendada) pra essa
+    # segunda chance não poder agendar uma terceira, evitando loop infinito.
     enviar_automaticamente = "--manual" not in sys.argv
     rodando_agendado = "--agendado" in sys.argv
     fechar_apos_enviar = "--diagnostico" not in sys.argv
+    retry_automatico = "--retry-automatico" in sys.argv
+    retry_tentativa = "--retry-tentativa" in sys.argv
     args = [
         a
         for a in sys.argv[1:]
-        if a not in ("--manual", "--agendado", "--diagnostico")
+        if a
+        not in (
+            "--manual",
+            "--agendado",
+            "--diagnostico",
+            "--retry-automatico",
+            "--retry-tentativa",
+        )
     ]
 
     # --destino "Nome" aponta o bot pra qualquer grupo/contato específico;
@@ -327,6 +408,10 @@ def main() -> None:
         )
     except Exception as erro:
         _log(f"[ERRO] {type(erro).__name__}: {erro}")
+        if retry_automatico and not retry_tentativa:
+            _agendar_nova_tentativa(sys.argv[1:])
+        elif retry_tentativa:
+            _log("A nova tentativa também falhou — nenhuma tentativa automática adicional será agendada.")
         if not rodando_agendado:
             _pausar_para_fechar()
         sys.exit(1)

@@ -7,6 +7,9 @@ saida/
 # Log de execução (gerado em runtime, não é código-fonte)
 log.txt
 
+# .bat gerado em runtime pelo --retry-automatico (reescrito a cada retry)
+_retry_envio.bat
+
 # Python
 __pycache__/
 *.pyc
