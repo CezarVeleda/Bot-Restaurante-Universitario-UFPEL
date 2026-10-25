@@ -1,7 +1,17 @@
 """Busca e formata o cardápio público do Restaurante Universitário (RU) da UFPel.
 
-Fonte dos dados: endpoint JSON público do sistema Cobalto (sem necessidade de login):
-https://cobalto.ufpel.edu.br/portal/cardapios/cardapioPublico/listaCardapios
+Fontes dos dados (sistema Cobalto, sem necessidade de login):
+- Endpoint do dashboard (usado pelo widget "Cardápio do Dia" da home do Cobalto):
+  https://cobalto.ufpel.edu.br/dashboard/cardapios/cardapio/listaCardapios
+  Sempre devolve o cardápio de HOJE (ignora qualquer parâmetro de data) — é o
+  que usamos por padrão, já que o bot roda diariamente buscando o dia atual.
+- Endpoint antigo do portal público (suporta escolher a data via txtData):
+  https://cobalto.ufpel.edu.br/portal/cardapios/cardapioPublico/listaCardapios
+  Usado só quando pedimos uma data diferente de hoje. Confirmado quebrado do
+  lado da UFPel em 2026-10-25 (devolve {"error":"Error Processing Request"}
+  pra qualquer data, inclusive hoje) — foi o motivo do cardápio do Centro ter
+  saído como "não cadastrado" no envio automático desse dia, mesmo havendo
+  cardápio real (visível no próprio site, via o endpoint do dashboard).
 """
 from __future__ import annotations
 
@@ -16,6 +26,7 @@ import requests
 _RE_POSSIVEL_TRACO = re.compile(r"\(pode conter[^)]*\)", re.IGNORECASE)
 
 BASE_URL = "https://cobalto.ufpel.edu.br/portal/cardapios/cardapioPublico/listaCardapios"
+URL_DASHBOARD_HOJE = "https://cobalto.ufpel.edu.br/dashboard/cardapios/cardapio/listaCardapios"
 
 # IDs de restaurante usados pelo Cobalto (campo cmbRestaurante do filtro do site).
 RESTAURANTES = {
@@ -77,8 +88,7 @@ def categorizar(nome: str, descricao: str = "") -> str:
     return "guarnicao"
 
 
-def buscar_cardapio(restaurante_id: int, data_str: str) -> list[dict]:
-    """Busca os itens do cardápio de um restaurante numa data (formato dd/mm/aaaa)."""
+def _buscar_no_portal(restaurante_id: int, data_str: str, headers: dict) -> list[dict]:
     params = {
         "txtData": data_str,
         "cmbRestaurante": restaurante_id,
@@ -87,10 +97,60 @@ def buscar_cardapio(restaurante_id: int, data_str: str) -> list[dict]:
         "sidx": "id",
         "sord": "asc",
     }
-    headers = {"User-Agent": "Mozilla/5.0"}
     resp = requests.get(BASE_URL, params=params, headers=headers, timeout=15)
     resp.raise_for_status()
     return resp.json().get("rows", [])
+
+
+def buscar_cardapio(restaurante_id: int, data_str: str) -> list[dict]:
+    """Busca os itens do cardápio de um restaurante numa data (formato dd/mm/aaaa).
+
+    Pra data de hoje, tenta primeiro o endpoint do dashboard (sem parâmetro de
+    data — é o que o widget "Cardápio do Dia" da home do Cobalto usa, e é o
+    único jeito de saber se "sem almoço" é porque o restaurante não abre hoje
+    ou porque o site quebrou: o endpoint do portal devolve {"error": ...} pros
+    dois casos igual, sem distinguir). Só cai pro endpoint antigo do portal se
+    o do dashboard falhar de verdade (erro de rede, HTTP ruim, ou JSON com
+    "error") — um resultado vazio sem erro (ex: Anglo fechado aos domingos)
+    não é falha, é dado real, e não aciona o fallback.
+
+    Pra outras datas (uso manual via `python main.py dd/mm/aaaa`) vai direto
+    pro endpoint do portal, que é o único dos dois que aceita escolher a data
+    — mas está instável/quebrado do lado da UFPel desde 2026-10-25.
+    """
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    if data_str != date.today().strftime("%d/%m/%Y"):
+        return _buscar_no_portal(restaurante_id, data_str, headers)
+
+    params = {
+        "cmbRestaurante": restaurante_id,
+        "page": 1,
+        "rows": 100,
+        "sidx": "id",
+        "sord": "asc",
+    }
+    try:
+        resp = requests.get(URL_DASHBOARD_HOJE, params=params, headers=headers, timeout=15)
+        resp.raise_for_status()
+        dados = resp.json()
+    except (requests.RequestException, ValueError) as erro:
+        print(
+            f"[aviso] Endpoint do dashboard falhou pro restaurante {restaurante_id} "
+            f"({erro}); tentando o endpoint antigo do portal como fallback.",
+            file=sys.stderr,
+        )
+        return _buscar_no_portal(restaurante_id, data_str, headers)
+
+    if "error" in dados:
+        print(
+            f"[aviso] Endpoint do dashboard devolveu erro pro restaurante {restaurante_id} "
+            f"({dados['error']!r}); tentando o endpoint antigo do portal como fallback.",
+            file=sys.stderr,
+        )
+        return _buscar_no_portal(restaurante_id, data_str, headers)
+
+    return dados.get("rows", [])
 
 
 def agrupar_por_refeicao(itens: list[dict]) -> dict[str, list[dict]]:
